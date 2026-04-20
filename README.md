@@ -26,9 +26,10 @@ stldev \
 - Launches a tiled `f3d` window per STL, kept alive across manual close
 - Ctrl-C cleanly shuts down the watcher and all viewers
 
-Pass extra args through to every f3d invocation using a `--` separator:
+Pass extra args through to every f3d invocation using either `-f3d-args` or a `--` separator (both work, and can be combined — `--` args are appended on top of `-f3d-args`):
 
 ```bash
+stldev -cmd "go run ." part.stl -f3d-args "--up=+Z --roughness=0.8"
 stldev -cmd "go run ." part.stl -- --up=+Z --roughness=0.8
 ```
 
