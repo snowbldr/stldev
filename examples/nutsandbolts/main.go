@@ -9,9 +9,10 @@ import (
 // Smaller is tighter.
 const mmTolerance = 0.3
 const inchTolerance = mmTolerance / units.MillimetresPerInch
+const decimate = 0.95
 
 // Quality: The long axis of the model is rendered with n cells.
-const quality = 200
+const quality = 2
 
 func inch() {
 	// bolt
@@ -21,14 +22,14 @@ func inch() {
 		Tolerance:   inchTolerance,
 		TotalLength: 2.0,
 		ShankLength: 0.5,
-	}).ScaleUniform(units.MillimetresPerInch).ToSTL("inch_bolt.stl", quality)
+	}).ScaleUniform(units.MillimetresPerInch).STL("inch_bolt.stl", quality, decimate)
 
 	// nut
 	obj.Nut(obj.NutParms{
 		Thread:    "unc_5/8",
 		Style:     "knurl",
 		Tolerance: inchTolerance,
-	}).ScaleUniform(units.MillimetresPerInch).ToSTL("inch_nut.stl", quality)
+	}).ScaleUniform(units.MillimetresPerInch).STL("inch_nut.stl", quality, decimate)
 }
 
 func metric() {
@@ -37,16 +38,16 @@ func metric() {
 		Thread:      "M16x2",
 		Style:       "hex",
 		Tolerance:   mmTolerance,
-		TotalLength: 1250.0,
+		TotalLength: 50.0,
 		ShankLength: 10.0,
-	}).ToSTL("metric_bolt.stl", quality)
+	}).STL("metric_bolt.stl", quality, decimate)
 
 	// nut
 	obj.Nut(obj.NutParms{
 		Thread:    "M16x2",
 		Style:     "hex",
 		Tolerance: mmTolerance,
-	}).ToSTL("metric_nut.stl", quality)
+	}).STL("metric_nut.stl", quality, decimate)
 }
 
 func main() {

@@ -6,7 +6,7 @@
 //
 // Typical use:
 //
-//	stldev -cmd "go run ./cmd/part -res 400 -suffix _dev all" core_dev.stl socket_dev.stl
+//	stldev -cmd "go run ./cmd/part -res 10 -suffix _dev all" core_dev.stl socket_dev.stl
 //
 // Requires f3d (https://f3d.app) to be installed on $PATH.
 package main
@@ -89,27 +89,83 @@ func main() {
 	done, stop := signalContext()
 	defer stop()
 
-	// Initial build so the STLs exist before f3d opens them. Write loading
-	// placeholders first so f3d has something valid to open even if the
-	// initial build fails.
-	if !*noLoading {
-		writeLoadingPlaceholders(stls)
+	// Snapshot which STLs already exist before we touch anything. Existing
+	// files get a viewer launched immediately against their prior output so
+	// f3d's auto-fit frames the real geometry; we then overwrite them with
+	// the dot-grid placeholder (after a short wait) for build-in-progress
+	// feedback. Missing files get the placeholder written up front as a
+	// fallback for build failure, but their viewer is delayed until after
+	// the initial build — opening the tiny placeholder first would leave
+	// f3d's camera fitted to it, badly framing the real part on reload.
+	existed := make([]bool, len(stls))
+	for i, p := range stls {
+		if _, err := os.Stat(p); err == nil {
+			existed[i] = true
+		}
 	}
-	fmt.Println("[stldev] initial build:", *cmdStr)
-	if err := runBuild(*cmdStr); err != nil {
-		fmt.Fprintln(os.Stderr, "[stldev] initial build failed:", err)
-		// don't exit — f3d can still open whatever is there, and the next
-		// edit will try again.
+	if !*noLoading {
+		writeLoadingPlaceholdersIfMissing(stls)
 	}
 
-	// Resolve which monitor to tile on.
 	mons := detectMonitors()
 	target := pickMonitor(mons, *monitor)
 	screenW2, screenH2 := resolveScreenSize(target, *screenW, *screenH, *noTile)
 	tileW, tileH := tileSize(len(stls), screenW2, screenH2)
 	x, y := resolveScreenOrigin(mons, target, *screenX, *screenY, *noTile)
-	viewers := launchViewers(done, f3dPath, *f3dArgsStr, passthrough, stls, x, y, tileW, tileH, *noTile)
+	baseArgs := splitArgs(*f3dArgsStr)
+	viewers := make([]*viewer, len(stls))
 	defer killViewers(viewers)
+
+	staggered := false
+	var existingPaths []string
+	for i := range stls {
+		if !existed[i] {
+			continue
+		}
+		if staggered {
+			time.Sleep(200 * time.Millisecond)
+		}
+		launchViewer(done, viewers, i, f3dPath, baseArgs, passthrough, stls, x, y, tileW, tileH, *noTile)
+		staggered = true
+		existingPaths = append(existingPaths, stls[i])
+	}
+
+	// Now that f3d has had a chance to open each existing STL and fit its
+	// camera to the real geometry, overwrite those files with the dot-grid
+	// placeholder so the user gets immediate visual feedback that a build
+	// is in flight. The 1s wait is a hedge against f3d's startup time —
+	// without it, f3d races us and ends up auto-fitting to the placeholder.
+	if !*noLoading && len(existingPaths) > 0 {
+		time.Sleep(1 * time.Second)
+		writeLoadingPlaceholders(existingPaths)
+	}
+
+	fmt.Println("[stldev] initial build:", *cmdStr)
+	if err := runBuild(*cmdStr); err != nil {
+		fmt.Fprintln(os.Stderr)
+		fmt.Fprintln(os.Stderr, "============================================================")
+		fmt.Fprintln(os.Stderr, "  [stldev] INITIAL BUILD FAILED")
+		fmt.Fprintln(os.Stderr, "============================================================")
+		fmt.Fprintln(os.Stderr, "  command:", *cmdStr)
+		fmt.Fprintln(os.Stderr, "  error:  ", err)
+		fmt.Fprintln(os.Stderr)
+		fmt.Fprintln(os.Stderr, "  Fix the build command above and re-run stldev.")
+		fmt.Fprintln(os.Stderr, "============================================================")
+		stop()
+		killViewers(viewers)
+		os.Exit(1)
+	}
+
+	for i := range stls {
+		if existed[i] {
+			continue
+		}
+		if staggered {
+			time.Sleep(200 * time.Millisecond)
+		}
+		launchViewer(done, viewers, i, f3dPath, baseArgs, passthrough, stls, x, y, tileW, tileH, *noTile)
+		staggered = true
+	}
 
 	// Start watcher.
 	watcher, err := fsnotify.NewWatcher()
@@ -180,6 +236,20 @@ func writeLoadingPlaceholders(paths []string) {
 	}
 }
 
+// writeLoadingPlaceholdersIfMissing writes the dot-grid STL only for paths
+// that don't exist yet. Used at startup so f3d has something to open without
+// clobbering an existing build output that's about to be regenerated.
+func writeLoadingPlaceholdersIfMissing(paths []string) {
+	for _, p := range paths {
+		if _, err := os.Stat(p); err == nil {
+			continue
+		}
+		if err := os.WriteFile(p, loadingSTL, 0o644); err != nil {
+			fmt.Fprintln(os.Stderr, "[stldev] write loading placeholder:", err)
+		}
+	}
+}
+
 func runBuild(cmdStr string) error {
 	c := exec.Command("sh", "-c", cmdStr)
 	c.Stdout = os.Stdout
@@ -229,13 +299,21 @@ func runLoop(done <-chan struct{}, w *fsnotify.Watcher, exts []string, debounce 
 			if !ok {
 				return
 			}
-			if !matchesExt(ev.Name, exts) {
-				// If a new directory was created, start watching it.
-				if ev.Op&fsnotify.Create != 0 {
-					if info, err := os.Stat(ev.Name); err == nil && info.IsDir() {
-						_ = addWatchRecursive(w, ev.Name)
-					}
+			// Pick up newly-created directories so the recursive watch keeps up.
+			if ev.Op&fsnotify.Create != 0 {
+				if info, err := os.Stat(ev.Name); err == nil && info.IsDir() {
+					_ = addWatchRecursive(w, ev.Name)
+					continue
 				}
+			}
+			if !matchesExt(ev.Name, exts) {
+				continue
+			}
+			// Only content changes trigger a rebuild. Many editors emit a
+			// Chmod (or Remove/Rename on swap/backup files) shortly after
+			// Write — if that tail event lands just past the debounce window,
+			// it queues a second trigger for what was really one save.
+			if ev.Op&(fsnotify.Write|fsnotify.Create) == 0 {
 				continue
 			}
 			if timer != nil {
@@ -404,7 +482,7 @@ func resolveScreenSize(target, overrideW, overrideH int, noTile bool) (int, int)
 	if w == 0 || h == 0 {
 		return 0, 0
 	}
-	// Chrome-adjusted tile sizes used by launchViewers' tilePosition layout.
+	// Chrome-adjusted tile sizes used by launchViewer's tilePosition layout.
 	return w, h
 }
 
@@ -460,28 +538,22 @@ func (v *viewer) set(cmd *exec.Cmd) {
 	v.mu.Unlock()
 }
 
-func launchViewers(done <-chan struct{}, f3dPath, extraArgs string, passthrough, stls []string, x, y, w, h int, noTile bool) []*viewer {
-	baseArgs := splitArgs(extraArgs)
-	viewers := make([]*viewer, len(stls))
-	for i, stl := range stls {
-		args := append([]string{}, baseArgs...)
-		args = append(args, passthrough...)
-		if !noTile && w > 0 && h > 0 {
-			px, py := tilePosition(i, len(stls), x, y, w, h)
-			args = append(args, fmt.Sprintf("--resolution=%d,%d", w, h))
-			args = append(args, fmt.Sprintf("--position=%d,%d", px, py))
-		}
-		args = append(args, stl)
-		v := &viewer{}
-		viewers[i] = v
-		// Stagger: on macOS, launching multiple GUI apps in the same tick
-		// causes a focus race where some windows end up behind others.
-		if i > 0 {
-			time.Sleep(200 * time.Millisecond)
-		}
-		go keepAlive(done, v, f3dPath, args)
+// launchViewer starts a single f3d viewer for stls[i], writing it into
+// viewers[i]. Caller is responsible for staggering successive launches: on
+// macOS, launching multiple GUI apps in the same tick causes a focus race
+// where some windows end up behind others.
+func launchViewer(done <-chan struct{}, viewers []*viewer, i int, f3dPath string, baseArgs, passthrough, stls []string, x, y, w, h int, noTile bool) {
+	args := append([]string{}, baseArgs...)
+	args = append(args, passthrough...)
+	if !noTile && w > 0 && h > 0 {
+		px, py := tilePosition(i, len(stls), x, y, w, h)
+		args = append(args, fmt.Sprintf("--resolution=%d,%d", w, h))
+		args = append(args, fmt.Sprintf("--position=%d,%d", px, py))
 	}
-	return viewers
+	args = append(args, stls[i])
+	v := &viewer{}
+	viewers[i] = v
+	go keepAlive(done, v, f3dPath, args)
 }
 
 // keepAlive runs f3d in a loop, relaunching on exit (matching the old

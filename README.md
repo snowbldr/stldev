@@ -15,9 +15,7 @@ Requires [f3d](https://f3d.app) on `$PATH`. On macOS: `brew install f3d`.
 ## Usage
 
 ```bash
-stldev \
-  -cmd "go run ./ -res 400 -suffix _dev all" \
-  core_dev.stl socket_dev.stl
+stldev -cmd "go run ." obj1.stl obj2.stl
 ```
 
 - Watches the current directory for `.go` changes (configurable)
