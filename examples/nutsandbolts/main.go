@@ -38,7 +38,7 @@ func metric() {
 		Thread:      "M16x2",
 		Style:       "hex",
 		Tolerance:   mmTolerance,
-		TotalLength: 50.0,
+		TotalLength: 150.0,
 		ShankLength: 10.0,
 	}).STL("metric_bolt.stl", quality, decimate)
 
